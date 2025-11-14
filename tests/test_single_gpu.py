@@ -23,4 +23,4 @@ def test_single_gpu_correctness():
     model = OMEinsum(equation, block_dim=block_dim, batch_size=batch_size, use_checkpoint=False)
     res = model(A, B, C, D)
 
-    assert torch.allclose(ref, res, atol=1e-8)
+    assert torch.allclose(ref.to(device=torch.device("cpu")), res.to(device=torch.device("cpu")), atol=1e-8)

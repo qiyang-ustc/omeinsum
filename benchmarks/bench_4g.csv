@@ -1,0 +1,5 @@
+chi,batch_size,avg_ms,iters,warmup,dtype,input_device,num_gpus,use_checkpoint,cpu_offload,with_grad
+256,64,18.167283851653337,20,5,torch.float32,cuda,4,False,False,False
+512,64,73.70867123827338,20,5,torch.float32,cuda,4,False,False,False
+768,64,186.76085348706692,20,5,torch.float32,cuda,4,False,False,False
+1024,64,387.8514509415254,20,5,torch.float32,cuda,4,False,False,False
