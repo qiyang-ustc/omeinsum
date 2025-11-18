@@ -68,7 +68,7 @@ class OMEinsum(nn.Module):
         for chunk in chunks:
             chunk_tensors = list(tensors)
             chunk_tensors[self.tidx] = chunk
-            chunk_result = opt_einsum.contract(self.equation, *chunk_tensors)
+            chunk_result = torch.utils.checkpoint.checkpoint(opt_einsum.contract, self.equation, *chunk_tensors, use_reentrant=True)
             results.append(chunk_result)
         return torch.cat(results, dim=self.out_dim)
 
@@ -156,7 +156,7 @@ class OMEinsum(nn.Module):
 
     def _forward(self, *tensors):
         if self.use_checkpoint:
-            return torch.utils.checkpoint.checkpoint(self._cpu_save_memory_impl, *tensors, use_reentrant=False)
+            return torch.utils.checkpoint.checkpoint(self._cpu_save_memory_impl, *tensors, use_reentrant=True)
         else:
             return self._forward_impl(*tensors)
 

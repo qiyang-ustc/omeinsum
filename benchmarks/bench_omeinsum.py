@@ -59,6 +59,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--use-checkpoint", action="store_true", help="Enable checkpointing in OMEinsum.")
     parser.add_argument("--cpu-offload", action="store_true", help="Enable CPU offload (effective only with grad).")
     parser.add_argument("--with-grad", action="store_true", help="Build autograd graph (no backward by default).")
+    parser.add_argument("--backward", action="store_true", help="Include backward pass with loss=output.norm().")
     parser.add_argument("--seed", type=int, default=0, help="Random seed.")
 
     parser.add_argument("--plot", action="store_true", help="Save a PNG plot of time vs chi.")
@@ -113,6 +114,7 @@ def benchmark_for_chi(
     use_checkpoint: bool,
     cpu_offload: bool,
     with_grad: bool,
+    do_backward: bool,
 ) -> Dict[str, Any]:
     device_count = torch.cuda.device_count() if torch.cuda.is_available() else 0
 
@@ -128,7 +130,7 @@ def benchmark_for_chi(
         d_small=dims["d"],
         device=alloc_device,
         dtype=dtype,
-        with_grad=with_grad,
+        with_grad=(with_grad or do_backward),
     )
 
     model = OMEinsum(equation, block_dim=block_dim, batch_size=batch_size, use_checkpoint=use_checkpoint)
@@ -136,47 +138,88 @@ def benchmark_for_chi(
     model.eval()
 
     # Warmup
-    if not with_grad:
+    if not (with_grad or do_backward):
         ctx = torch.no_grad()
     else:
         ctx = torch.enable_grad()
     with ctx:
         for _ in range(max(0, warmup)):
-            _ = model(T, V, Mu, Md, V)
+            out = model(T, V, Mu, Md, V)
+            if do_backward:
+                T.grad = V.grad = Mu.grad = Md.grad = None
+                loss = out.norm()
+                loss.backward()
             synchronize()
 
         # Timed
-        avg_s: float
+        avg_s_total: float
+        avg_s_fwd: float = 0.0
+        avg_s_bwd: float = 0.0
         effective_iters: int
         synchronize()
         if target_sec > 0:
             # Accumulate iterations until reaching target_sec, synchronizing each step for accurate timing
             start = time.perf_counter()
+            fwd_acc = 0.0
+            bwd_acc = 0.0
             cnt = 0
             while True:
-                _ = model(T, V, Mu, Md, V)
+                t0 = time.perf_counter()
+                out = model(T, V, Mu, Md, V)
+                synchronize()
+                t1 = time.perf_counter()
+                if do_backward:
+                    T.grad = V.grad = Mu.grad = Md.grad = None
+                    loss = out.norm()
+                    loss.backward()
+                    synchronize()
+                t2 = time.perf_counter()
+                fwd_acc += (t1 - t0)
+                bwd_acc += (t2 - t1) if do_backward else 0.0
                 synchronize()
                 cnt += 1
                 elapsed = time.perf_counter() - start
                 if elapsed >= target_sec:
-                    avg_s = elapsed / cnt
+                    avg_s_total = elapsed / cnt
+                    avg_s_fwd = fwd_acc / cnt
+                    avg_s_bwd = (bwd_acc / cnt) if do_backward else 0.0
                     effective_iters = cnt
                     break
         else:
-            t0 = time.perf_counter()
+            fwd_acc = 0.0
+            bwd_acc = 0.0
+            total_t0 = time.perf_counter()
             for _ in range(iters):
-                _ = model(T, V, Mu, Md, V)
+                t0 = time.perf_counter()
+                out = model(T, V, Mu, Md, V)
+                synchronize()
+                t1 = time.perf_counter()
+                if do_backward:
+                    T.grad = V.grad = Mu.grad = Md.grad = None
+                    loss = out.norm()
+                    loss.backward()
+                    synchronize()
+                t2 = time.perf_counter()
+                fwd_acc += (t1 - t0)
+                bwd_acc += (t2 - t1) if do_backward else 0.0
             synchronize()
-            t1 = time.perf_counter()
-            avg_s = (t1 - t0) / max(1, iters)
+            total_t1 = time.perf_counter()
+            avg_s_total = (total_t1 - total_t0) / max(1, iters)
+            avg_s_fwd = fwd_acc / max(1, iters)
+            avg_s_bwd = (bwd_acc / max(1, iters)) if do_backward else 0.0
             effective_iters = iters
 
-    avg_ms = avg_s * 1000.0
+    avg_ms_total = avg_s_total * 1000.0
+    avg_ms_fwd = avg_s_fwd * 1000.0
+    avg_ms_bwd = avg_s_bwd * 1000.0
 
     return {
         "chi": chi,
         "batch_size": batch_size,
-        "avg_ms": avg_ms,
+        "avg_ms": avg_ms_total,  # backward compatibility
+        "avg_ms_total": avg_ms_total,
+        "avg_ms_fwd": avg_ms_fwd,
+        "avg_ms_bwd": avg_ms_bwd,
         "iters": effective_iters,
         "warmup": warmup,
         "dtype": str(dtype),
@@ -185,6 +228,7 @@ def benchmark_for_chi(
         "use_checkpoint": use_checkpoint,
         "cpu_offload": cpu_offload,
         "with_grad": with_grad,
+        "backward": do_backward,
     }
 
 
@@ -219,6 +263,9 @@ def maybe_save_csv(results: List[Dict[str, Any]], out_path: Path):
         "chi",
         "batch_size",
         "avg_ms",
+        "avg_ms_total",
+        "avg_ms_fwd",
+        "avg_ms_bwd",
         "iters",
         "warmup",
         "dtype",
@@ -227,6 +274,7 @@ def maybe_save_csv(results: List[Dict[str, Any]], out_path: Path):
         "use_checkpoint",
         "cpu_offload",
         "with_grad",
+        "backward",
     ]
     with out_path.open("w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -272,8 +320,12 @@ def main():
             use_checkpoint=args.use_checkpoint,
             cpu_offload=args.cpu_offload,
             with_grad=args.with_grad,
+            do_backward=args.backward,
         )
-        print(f"[bench] chi={chi:4d} | batch_size={res['batch_size']:4d} | {res['avg_ms']:.3f} ms")
+        if args.backward:
+            print(f"[bench] chi={chi:4d} | batch_size={res['batch_size']:4d} | total={res['avg_ms_total']:.3f} ms (fwd={res['avg_ms_fwd']:.3f} ms, bwd={res['avg_ms_bwd']:.3f} ms)")
+        else:
+            print(f"[bench] chi={chi:4d} | batch_size={res['batch_size']:4d} | fwd={res['avg_ms_fwd']:.3f} ms")
         results.append(res)
 
     # Outputs
