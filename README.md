@@ -1,3 +1,3 @@
 # OMEinsum
 
-PyTorch einsum with CPU offload, checkpoint, and multi-GPU dispatch, slicing, path and memory band-width optimization.
+PyTorch einsum with chunked execution, per-GPU checkpointing, and multi-GPU dispatch.

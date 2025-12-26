@@ -1,20 +1,51 @@
 # Python
 __pycache__/
-*.pyc
-*.pyo
+*.py[cod]
 *.pyd
 *.egg-info/
+.eggs/
+*.egg
+*.whl
 .build/
 build/
 dist/
 
+# Test/Coverage
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.tox/
+.nox/
+.hypothesis/
+
+# Type checking/Lint
+.mypy_cache/
+.ruff_cache/
+.pytype/
+.pyre/
+
 # Env
 .venv/
 venv/
+env/
+ENV/
+.venv.bak/
+venv.bak/
+
+# Jupyter
+.ipynb_checkpoints/
 
 # IDE
 .idea/
 .vscode/
+
+# Logs
+*.log
+
+# Local data/outputs
+traces/
 
 # Misc
 .DS_Store
