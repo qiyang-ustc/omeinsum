@@ -25,7 +25,6 @@ DEFAULT_CONFIG = {
     "checkpoint": False,
     "use_omeinsum": True,
     "use_omeinsum_update_t": False,
-    "ctmrg_checkpoint_full_step": False,
     "ome_batch_size": 16,
     "ctmrg_cpu_offload": False,
     "ome_checkpoint": False,
@@ -72,11 +71,9 @@ class CTMRG:
         ome_batch_size=4,
         ome_checkpoint=False,
         ome_use_reentrant=False,
-        ctmrg_checkpoint_full_step=False,
     ):
         self.checkpoint = checkpoint
         self.cpu_offload = ctmrg_cpu_offload
-        self.checkpoint_full_step = ctmrg_checkpoint_full_step
         self.ome_update_t = None
         if use_omeinsum_update_t:
             if OMEinsum is None:
@@ -115,7 +112,7 @@ class CTMRG:
                 C, T = self._ctmrg_step(C, T, M)
 
         for _ in range(ADiter):
-            if self.checkpoint_full_step and self.checkpoint and ADiter > 0 and M.requires_grad and torch.is_grad_enabled():
+            if self.checkpoint and ADiter > 0 and M.requires_grad and torch.is_grad_enabled():
                 if self.cpu_offload:
                     with torch.autograd.graph.save_on_cpu(pin_memory=True):
                         C, T = torch.utils.checkpoint.checkpoint(
@@ -126,21 +123,7 @@ class CTMRG:
                         self._ctmrg_step, C, T, M, use_reentrant=False
                     )
             else:
-                v, r = self._qr(C, T)
-                if self.checkpoint and ADiter > 0 and M.requires_grad and torch.is_grad_enabled():
-                    if self.cpu_offload:
-                        with torch.autograd.graph.save_on_cpu(pin_memory=True):
-                            T = torch.utils.checkpoint.checkpoint(
-                                self._update_T, T, v, M, use_reentrant=True
-                            )
-                    else:
-                        T = torch.utils.checkpoint.checkpoint(
-                            self._update_T, T, v, M, use_reentrant=True
-                        )
-                else:
-                    T = self._update_T(T, v, M)
-                C = torch.einsum("ijkl,la,ajkx->ix", T, r, v)
-                C, T = normalize(C+C.T.conj()), normalize(T+T.permute(3, 1, 2, 0).conj())
+                C, T = self._ctmrg_step(C, T, M)
         return [C, T]
 
 
@@ -193,7 +176,6 @@ def mwe_main(config=None):
     maxoptiter = cfg["maxoptiter"]
     use_omeinsum = cfg["use_omeinsum"]
     use_omeinsum_update_t = cfg["use_omeinsum_update_t"]
-    ctmrg_checkpoint_full_step = cfg["ctmrg_checkpoint_full_step"]
     ome_batch_size = cfg["ome_batch_size"]
     ctmrg_cpu_offload = cfg["ctmrg_cpu_offload"]
     ome_checkpoint = cfg["ome_checkpoint"]
@@ -220,7 +202,6 @@ def mwe_main(config=None):
         ome_batch_size=ome_batch_size,
         ome_checkpoint=ome_checkpoint,
         ome_use_reentrant=ome_use_reentrant,
-        ctmrg_checkpoint_full_step=ctmrg_checkpoint_full_step,
     )
 
     nparams = d * D * D * D * D
@@ -276,11 +257,6 @@ if __name__ == "__main__":
         "--use-omeinsum-update-t",
         action=argparse.BooleanOptionalAction,
         default=DEFAULT_CONFIG["use_omeinsum_update_t"],
-    )
-    parser.add_argument(
-        "--ctmrg-checkpoint-full-step",
-        action=argparse.BooleanOptionalAction,
-        default=DEFAULT_CONFIG["ctmrg_checkpoint_full_step"],
     )
     parser.add_argument("--ome-batch-size", type=int, default=DEFAULT_CONFIG["ome_batch_size"])
     parser.add_argument("--ctmrg-cpu-offload", action=argparse.BooleanOptionalAction, default=DEFAULT_CONFIG["ctmrg_cpu_offload"])
