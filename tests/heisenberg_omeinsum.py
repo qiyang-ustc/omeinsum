@@ -24,6 +24,8 @@ DEFAULT_CONFIG = {
     "maxoptiter": 120,
     "checkpoint": False,
     "use_omeinsum": True,
+    "use_omeinsum_update_t": False,
+    "ctmrg_checkpoint_full_step": False,
     "ome_batch_size": 16,
     "ctmrg_cpu_offload": False,
     "ome_checkpoint": False,
@@ -66,9 +68,26 @@ class CTMRG:
         self,
         checkpoint=True,
         ctmrg_cpu_offload=False,
+        use_omeinsum_update_t=False,
+        ome_batch_size=4,
+        ome_checkpoint=False,
+        ome_use_reentrant=False,
+        ctmrg_checkpoint_full_step=False,
     ):
         self.checkpoint = checkpoint
         self.cpu_offload = ctmrg_cpu_offload
+        self.checkpoint_full_step = ctmrg_checkpoint_full_step
+        self.ome_update_t = None
+        if use_omeinsum_update_t:
+            if OMEinsum is None:
+                raise RuntimeError("OMEinsum not available; install omeinsum or disable --use-omeinsum.")
+            self.ome_update_t = OMEinsum(
+                "ibfj,iaep,xabcd,xefgh,jcgq->pdhq",
+                block_dim="p",
+                batch_size=ome_batch_size,
+                use_checkpoint=ome_checkpoint,
+                use_reentrant=ome_use_reentrant,
+            )
 
     @staticmethod
     def _qr(C: torch.Tensor, T: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -78,33 +97,50 @@ class CTMRG:
         return q.reshape(chi, D, D, chi), r
 
     def _update_T(self, T: torch.Tensor, v: torch.Tensor, M: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        if self.ome_update_t is not None:
+            return self.ome_update_t(T, v, M, M.conj(), v)
         return torch.einsum("ibfj,iaep,xabcd,xefgh,jcgq->pdhq", T, v, M, M.conj(), v)
+
+    def _ctmrg_step(self, C: torch.Tensor, T: torch.Tensor, M: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        v, r = self._qr(C, T)
+        T = self._update_T(T, v, M)
+        C = torch.einsum("ijkl,la,ajkx->ix", T, r, v)
+        C, T = normalize(C+C.T.conj()), normalize(T+T.permute(3, 1, 2, 0).conj())
+        return C, T
 
     def __call__(self, M: torch.Tensor, env: List[torch.Tensor], warmup=0, ADiter=0) -> List[torch.Tensor]:
         C, T = env
         with torch.no_grad():
             for _ in range(warmup):
-                v, r = self._qr(C, T)
-                T = self._update_T(T, v, M)
-                C = torch.einsum("ijkl,la,ajkx->ix", T, r, v)
-                C, T = normalize(C+C.T.conj()), normalize(T+T.permute(3, 1, 2, 0).conj())
+                C, T = self._ctmrg_step(C, T, M)
 
         for _ in range(ADiter):
-            v, r = self._qr(C, T)
-            if self.checkpoint and ADiter > 0 and M.requires_grad and torch.is_grad_enabled():
+            if self.checkpoint_full_step and self.checkpoint and ADiter > 0 and M.requires_grad and torch.is_grad_enabled():
                 if self.cpu_offload:
                     with torch.autograd.graph.save_on_cpu(pin_memory=True):
+                        C, T = torch.utils.checkpoint.checkpoint(
+                            self._ctmrg_step, C, T, M, use_reentrant=False
+                        )
+                else:
+                    C, T = torch.utils.checkpoint.checkpoint(
+                        self._ctmrg_step, C, T, M, use_reentrant=False
+                    )
+            else:
+                v, r = self._qr(C, T)
+                if self.checkpoint and ADiter > 0 and M.requires_grad and torch.is_grad_enabled():
+                    if self.cpu_offload:
+                        with torch.autograd.graph.save_on_cpu(pin_memory=True):
+                            T = torch.utils.checkpoint.checkpoint(
+                                self._update_T, T, v, M, use_reentrant=True
+                            )
+                    else:
                         T = torch.utils.checkpoint.checkpoint(
                             self._update_T, T, v, M, use_reentrant=True
                         )
                 else:
-                    T = torch.utils.checkpoint.checkpoint(
-                        self._update_T, T, v, M, use_reentrant=True
-                    )
-            else:
-                T = self._update_T(T, v, M)
-            C = torch.einsum("ijkl,la,ajkx->ix", T, r, v)
-            C, T = normalize(C+C.T.conj()), normalize(T+T.permute(3, 1, 2, 0).conj())
+                    T = self._update_T(T, v, M)
+                C = torch.einsum("ijkl,la,ajkx->ix", T, r, v)
+                C, T = normalize(C+C.T.conj()), normalize(T+T.permute(3, 1, 2, 0).conj())
         return [C, T]
 
 
@@ -156,6 +192,8 @@ def mwe_main(config=None):
     warmupiter = cfg["warmupiter"]
     maxoptiter = cfg["maxoptiter"]
     use_omeinsum = cfg["use_omeinsum"]
+    use_omeinsum_update_t = cfg["use_omeinsum_update_t"]
+    ctmrg_checkpoint_full_step = cfg["ctmrg_checkpoint_full_step"]
     ome_batch_size = cfg["ome_batch_size"]
     ctmrg_cpu_offload = cfg["ctmrg_cpu_offload"]
     ome_checkpoint = cfg["ome_checkpoint"]
@@ -178,6 +216,11 @@ def mwe_main(config=None):
     ctmrg = CTMRG(
         checkpoint=cfg["checkpoint"],
         ctmrg_cpu_offload=ctmrg_cpu_offload,
+        use_omeinsum_update_t=use_omeinsum_update_t,
+        ome_batch_size=ome_batch_size,
+        ome_checkpoint=ome_checkpoint,
+        ome_use_reentrant=ome_use_reentrant,
+        ctmrg_checkpoint_full_step=ctmrg_checkpoint_full_step,
     )
 
     nparams = d * D * D * D * D
@@ -229,6 +272,16 @@ if __name__ == "__main__":
     parser.add_argument("--maxoptiter", type=int, default=DEFAULT_CONFIG["maxoptiter"])
     parser.add_argument("--checkpoint", action=argparse.BooleanOptionalAction, default=DEFAULT_CONFIG["checkpoint"])
     parser.add_argument("--use-omeinsum", action=argparse.BooleanOptionalAction, default=DEFAULT_CONFIG["use_omeinsum"])
+    parser.add_argument(
+        "--use-omeinsum-update-t",
+        action=argparse.BooleanOptionalAction,
+        default=DEFAULT_CONFIG["use_omeinsum_update_t"],
+    )
+    parser.add_argument(
+        "--ctmrg-checkpoint-full-step",
+        action=argparse.BooleanOptionalAction,
+        default=DEFAULT_CONFIG["ctmrg_checkpoint_full_step"],
+    )
     parser.add_argument("--ome-batch-size", type=int, default=DEFAULT_CONFIG["ome_batch_size"])
     parser.add_argument("--ctmrg-cpu-offload", action=argparse.BooleanOptionalAction, default=DEFAULT_CONFIG["ctmrg_cpu_offload"])
     parser.add_argument("--ome-checkpoint", action=argparse.BooleanOptionalAction, default=DEFAULT_CONFIG["ome_checkpoint"])
