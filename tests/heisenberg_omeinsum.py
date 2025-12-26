@@ -22,11 +22,11 @@ DEFAULT_CONFIG = {
     "warmup": 2,
     "warmupiter": 40,
     "maxoptiter": 120,
-    "checkpoint": True,
+    "checkpoint": False,
     "use_omeinsum": True,
     "ome_batch_size": 16,
-    "ctmrg_cpu_offload": True,
-    "ome_checkpoint": True,
+    "ctmrg_cpu_offload": False,
+    "ome_checkpoint": False,
     "ome_use_reentrant": False,
 }
 
@@ -65,26 +65,10 @@ class CTMRG:
     def __init__(
         self,
         checkpoint=True,
-        use_omeinsum=True,
-        ome_batch_size=4,
-        ctmrg_cpu_offload=True,
-        ome_checkpoint=True,
-        ome_use_reentrant=False,
+        ctmrg_cpu_offload=False,
     ):
         self.checkpoint = checkpoint
-        self.use_omeinsum = use_omeinsum
         self.cpu_offload = ctmrg_cpu_offload
-        self.ome = None
-        if use_omeinsum:
-            if OMEinsum is None:
-                raise RuntimeError("OMEinsum not available; install omeinsum or disable --use-omeinsum.")
-            self.ome = OMEinsum(
-                "ibfj,iaep,xabcd,xefgh,jcgq->pdhq",
-                block_dim="p",
-                batch_size=ome_batch_size,
-                use_checkpoint=ome_checkpoint,
-                use_reentrant=ome_use_reentrant,
-            )
 
     @staticmethod
     def _qr(C: torch.Tensor, T: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -94,36 +78,33 @@ class CTMRG:
         return q.reshape(chi, D, D, chi), r
 
     def _update_T(self, T: torch.Tensor, v: torch.Tensor, M: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        if self.ome is not None:
-            return self.ome(T, v, M, M.conj(), v)
         return torch.einsum("ibfj,iaep,xabcd,xefgh,jcgq->pdhq", T, v, M, M.conj(), v)
-
-    def _ctmrg_step(self, C: torch.Tensor, T: torch.Tensor, M: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        v, r = self._qr(C, T)
-        T = self._update_T(T, v, M)
-        C = torch.einsum("ijkl,la,ajkx->ix", T, r, v)
-        C, T = normalize(C+C.T.conj()), normalize(T+T.permute(3, 1, 2, 0).conj())
-        return C, T
 
     def __call__(self, M: torch.Tensor, env: List[torch.Tensor], warmup=0, ADiter=0) -> List[torch.Tensor]:
         C, T = env
         with torch.no_grad():
             for _ in range(warmup):
-                C, T = self._ctmrg_step(C, T, M)
+                v, r = self._qr(C, T)
+                T = self._update_T(T, v, M)
+                C = torch.einsum("ijkl,la,ajkx->ix", T, r, v)
+                C, T = normalize(C+C.T.conj()), normalize(T+T.permute(3, 1, 2, 0).conj())
 
         for _ in range(ADiter):
+            v, r = self._qr(C, T)
             if self.checkpoint and ADiter > 0 and M.requires_grad and torch.is_grad_enabled():
                 if self.cpu_offload:
                     with torch.autograd.graph.save_on_cpu(pin_memory=True):
-                        C, T = torch.utils.checkpoint.checkpoint(
-                            self._ctmrg_step, C, T, M, use_reentrant=False
+                        T = torch.utils.checkpoint.checkpoint(
+                            self._update_T, T, v, M, use_reentrant=True
                         )
                 else:
-                    C, T = torch.utils.checkpoint.checkpoint(
-                        self._ctmrg_step, C, T, M, use_reentrant=False
+                    T = torch.utils.checkpoint.checkpoint(
+                        self._update_T, T, v, M, use_reentrant=True
                     )
             else:
-                C, T = self._ctmrg_step(C, T, M)
+                T = self._update_T(T, v, M)
+            C = torch.einsum("ijkl,la,ajkx->ix", T, r, v)
+            C, T = normalize(C+C.T.conj()), normalize(T+T.permute(3, 1, 2, 0).conj())
         return [C, T]
 
 
@@ -146,52 +127,9 @@ class HeisenbergEnergy:
         L = torch.einsum("ij,jklm,mn->ikln", Csym, Tsym, Csym)
         if self.ome_rho_xy is None:
             L = torch.einsum("ibfj,iaep,xabcd,yefgh,jcgq->pdhqxy", L, Tsym, M, M.conj(), Tsym)
-            return torch.einsum("pdhqxy,pdhqzw->xyzw", L, L)
-
-        d_phys = M.shape[0]
-        rho = torch.zeros(d_phys, d_phys, d_phys, d_phys, device=L.device, dtype=L.dtype)
-
-        if not torch.is_grad_enabled():
-            Lxy = [[None for _ in range(d_phys)] for _ in range(d_phys)]
-            for x in range(d_phys):
-                Mx = M[x]
-                for y in range(d_phys):
-                    My = M.conj()[y]
-                    Lxy[x][y] = self.ome_rho_xy(L, Tsym, Mx, My, Tsym)
-
-            for x in range(d_phys):
-                for y in range(d_phys):
-                    for z in range(d_phys):
-                        for w in range(d_phys):
-                            rho[x, y, z, w] = torch.einsum(
-                                "pdhq,pdhq->", Lxy[x][y], Lxy[z][w]
-                            )
-            return rho
-
-        def _dot(
-            L: torch.Tensor,
-            Tsym: torch.Tensor,
-            Mx: torch.Tensor,
-            My: torch.Tensor,
-            Mz: torch.Tensor,
-            Mw: torch.Tensor,
-        ) -> torch.Tensor:
-            Lxy = self.ome_rho_xy(L, Tsym, Mx, My, Tsym)
-            Lzw = self.ome_rho_xy(L, Tsym, Mz, Mw, Tsym)
-            return torch.einsum("pdhq,pdhq->", Lxy, Lzw)
-
-        for x in range(d_phys):
-            Mx = M[x]
-            for y in range(d_phys):
-                My = M.conj()[y]
-                for z in range(d_phys):
-                    Mz = M[z]
-                    for w in range(d_phys):
-                        Mw = M.conj()[w]
-                        rho[x, y, z, w] = torch.utils.checkpoint.checkpoint(
-                            _dot, L, Tsym, Mx, My, Mz, Mw, use_reentrant=False
-                        )
-        return rho
+        else:
+            L = self.ome_rho_xy(L, Tsym, M, M.conj(), Tsym)
+        return torch.einsum("pdhqxy,pdhqzw->xyzw", L, L)
 
     def __call__(self, M: torch.Tensor, env: List[torch.Tensor]) -> torch.Tensor:
         rho = self._rho(env, M)
@@ -229,7 +167,7 @@ def mwe_main(config=None):
     ome_rho_xy = None
     if use_omeinsum:
         ome_rho_xy = OMEinsum(
-            "ibfj,iaep,abcd,efgh,jcgq->pdhq",
+            "ibfj,iaep,xabcd,yefgh,jcgq->pdhqxy",
             block_dim="p",
             batch_size=ome_batch_size,
             use_checkpoint=ome_checkpoint,
@@ -239,11 +177,7 @@ def mwe_main(config=None):
     initializer = EnvironmentInitializer()
     ctmrg = CTMRG(
         checkpoint=cfg["checkpoint"],
-        use_omeinsum=use_omeinsum,
-        ome_batch_size=ome_batch_size,
         ctmrg_cpu_offload=ctmrg_cpu_offload,
-        ome_checkpoint=ome_checkpoint,
-        ome_use_reentrant=ome_use_reentrant,
     )
 
     nparams = d * D * D * D * D
