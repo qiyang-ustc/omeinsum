@@ -176,23 +176,13 @@ class QRCTMRG:
         return Cnew, Rnew
 
     def __call__(self, M: torch.Tensor, env: List[torch.Tensor], warmup=0, ADiter=0) -> List[torch.Tensor]:
-        C, R = env
-        for _ in range(warmup):
-            C, R = self._ctmrg_step(C, R, M)
-
-        for _ in range(ADiter):
-            if self.checkpoint and ADiter > 0 and M.requires_grad and torch.is_grad_enabled():
-                if self.cpu_offload:
-                    with torch.autograd.graph.save_on_cpu(pin_memory=True):
-                        C, R = torch.utils.checkpoint.checkpoint(
-                            self._ctmrg_step, C, R, M, use_reentrant=False
-                        )
-                else:
-                    C, R = torch.utils.checkpoint.checkpoint(
-                        self._ctmrg_step, C, R, M, use_reentrant=False
-                    )
-            else:
-                C, R = self._ctmrg_step(C, R, M)
+        C, R = env[0].detach(), env[1].detach()
+        for _ in range(warmup + ADiter):
+            v, r = self._cheap_forward(C, R)
+            Rnew = self._update_R_ome(v, R, M)
+            Cnew = torch.einsum("tJKc,tb,bJKr->cr", Rnew.conj(), r, v)
+            C = Cnew / torch.linalg.norm(Cnew)
+            R = Rnew / torch.linalg.norm(Rnew)
         return [C, R]
 
 
@@ -321,22 +311,17 @@ def mwe_main(config: Optional[Dict[str, Any]] = None):
         nonlocal fun_evals, iteration_count, env, prev_params
         optimizer.zero_grad(set_to_none=True)
         M = normalize(symmetrizer(P))
-        env2 = ctmrg_module(M, env, warmup=0, ADiter=ADiter)
-        E = energy_module(M, env2)
+        env = ctmrg_module(M, env, warmup=warmup, ADiter=ADiter)
+        E = energy_module(M, env)
         E.backward()
         fun_evals += 1
         
-        # Update environment for next iteration (similar to main.py closure)
         with torch.no_grad():
-            M_now = normalize(symmetrizer(P))
-            env = ctmrg_module(M_now, env, warmup=warmup, ADiter=0)
-            E_now = energy_module(M_now, env).item()
-            
             # Only print and record on actual LBFGS iterations (not line search evaluations)
             current_iter = optimizer.state[P].get('n_iter', 0)
             if current_iter > iteration_count:
                 iteration_count = current_iter
-                loss_history.append(E_now)
+                loss_history.append(E.item())
                 elapsed = time.time() - wall0
                 time_history.append(elapsed)
                 grad_norm = torch.norm(P.grad) if P.grad is not None else torch.tensor(0.0, dtype=torch.float64)
@@ -344,7 +329,7 @@ def mwe_main(config: Optional[Dict[str, Any]] = None):
                 dparam = torch.norm(P.detach() - prev_params).item()
                 param_changes.append(dparam)
                 prev_params = P.detach().clone()
-                print(f"[Iter {iteration_count:4d}/{maxoptiter}] E={E_now:.8f} | grad={grad_norm.item():.3e} | dP={dparam:.3e} | t={elapsed:.2f}s | fevals={fun_evals}")
+                print(f"[Iter {iteration_count:4d}/{maxoptiter}] E={E.item():.8f} | grad={grad_norm.item():.3e} | dP={dparam:.3e} | t={elapsed:.2f}s | fevals={fun_evals}")
         
         return E
 

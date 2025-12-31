@@ -18,6 +18,8 @@ DEFAULT_CONFIG = {
     "d": 2,
     "D": 4,
     "seed": 7,
+    "j1": 1.0,
+    "j2": 0.5,
     "ADiter": 16,
     "warmup": 2,
     "warmupiter": 40,
@@ -142,8 +144,10 @@ class CTMRG:
         return [C, T]
 
 
-class HeisenbergEnergy:
-    def __init__(self, ome_rho_xy=None):
+class J1J2Energy:
+    def __init__(self, j1: float, j2: float, ome_rho_xy=None):
+        self.j1 = j1
+        self.j2 = j2
         sp = torch.tensor([[0.0, 1.0], [0.0, 0.0]], dtype=DTYPE, device=DEVICE)
         sm = torch.tensor([[0.0, 0.0], [1.0, 0.0]], dtype=DTYPE, device=DEVICE)
         sz = torch.tensor([[1.0, 0.0], [0.0, -1.0]], dtype=DTYPE, device=DEVICE)
@@ -152,7 +156,10 @@ class HeisenbergEnergy:
         Ez = torch.einsum("ij,kl->ijkl", sz, sz_r) / 4
         Ep = torch.einsum("ij,kl->ijkl", sp, sm_r) / 2
         Em = torch.einsum("ij,kl->ijkl", sm, sp_r) / 2
-        self.E = (Ez + Ep + Em).to(DEVICE)
+        self.E_nn = (Ez + Ep + Em).to(DEVICE)
+        self.sp = sp
+        self.sm = sm
+        self.sz = sz
         self.ome_rho_xy = ome_rho_xy
 
     def _rho(self, env: List[torch.Tensor], M: torch.Tensor) -> torch.Tensor:
@@ -165,11 +172,60 @@ class HeisenbergEnergy:
             L = self.ome_rho_xy(L, Tsym, M, M.conj(), Tsym)
         return torch.einsum("pdhqxy,pdhqzw->xyzw", L, L)
 
+    @staticmethod
+    def _site_op(M: torch.Tensor, op: torch.Tensor) -> torch.Tensor:
+        return torch.einsum("xabcd,xy,yefgh->aebfcgdh", M, op, M.conj())
+
+    @staticmethod
+    def _contract_plaquette(
+        C: torch.Tensor, T: torch.Tensor, A00: torch.Tensor, A01: torch.Tensor, A10: torch.Tensor, A11: torch.Tensor
+    ) -> torch.Tensor:
+        # 2x2 plaquette contraction with C4-symmetric environment.
+        return torch.einsum(
+            "ab,buUc,cvVd,de,erRf,fsSg,lg,jxXk,kyYl,ij,apPh,hqQi,pPuUtTzZ,tTvVrRmM,qQzZwWxX,wWmMsSyY->",
+            C,
+            T,
+            T,
+            C,
+            T,
+            T,
+            C,
+            T,
+            T,
+            C,
+            T,
+            T,
+            A00,
+            A01,
+            A10,
+            A11,
+        )
+
+    def _diag_energy(self, env: List[torch.Tensor], M: torch.Tensor) -> torch.Tensor:
+        C, T = env
+        Csym, Tsym = C + C.conj(), T + T.permute(3, 1, 2, 0).conj()
+        identity = torch.eye(M.shape[0], dtype=DTYPE, device=M.device)
+        A_id = self._site_op(M, identity)
+        denom = self._contract_plaquette(Csym, Tsym, A_id, A_id, A_id, A_id)
+
+        def expect(op_left: torch.Tensor, op_right: torch.Tensor) -> torch.Tensor:
+            A00 = self._site_op(M, op_left)
+            A11 = self._site_op(M, op_right)
+            num = self._contract_plaquette(Csym, Tsym, A00, A_id, A_id, A11)
+            return num / denom
+
+        e_sz = expect(self.sz, self.sz)
+        e_sp_sm = expect(self.sp, self.sm)
+        e_sm_sp = expect(self.sm, self.sp)
+        return torch.real(e_sz / 4 + (e_sp_sm + e_sm_sp) / 2)
+
     def __call__(self, M: torch.Tensor, env: List[torch.Tensor]) -> torch.Tensor:
         rho = self._rho(env, M)
         norm = torch.einsum("aacc->", rho)
-        energy = torch.einsum("abcd,abcd->", rho, self.E)
-        return 2.0 * torch.real(energy / norm)
+        energy_nn = torch.einsum("abcd,abcd->", rho, self.E_nn)
+        e_nn = torch.real(energy_nn / norm)
+        e_diag = self._diag_energy(env, M)
+        return 2.0 * (self.j1 * e_nn + self.j2 * e_diag)
 
 
 def bulk_tensor(params: torch.Tensor, d: int, D: int) -> torch.Tensor:
@@ -185,6 +241,8 @@ def mwe_main(config=None):
     d = cfg["d"]
     D = cfg["D"]
     seed = cfg["seed"]
+    j1 = cfg["j1"]
+    j2 = cfg["j2"]
     ADiter = cfg["ADiter"]
     warmup = cfg["warmup"]
     warmupiter = cfg["warmupiter"]
@@ -208,7 +266,7 @@ def mwe_main(config=None):
             use_checkpoint=ome_checkpoint,
             use_reentrant=ome_use_reentrant,
         )
-    energy_fn = HeisenbergEnergy(ome_rho_xy=ome_rho_xy)
+    energy_fn = J1J2Energy(j1, j2, ome_rho_xy=ome_rho_xy)
     initializer = EnvironmentInitializer()
     ctmrg = CTMRG(
         checkpoint=cfg["checkpoint"],
@@ -256,11 +314,13 @@ def mwe_main(config=None):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="2D Heisenberg C4 PEPS (PyTorch)")
+    parser = argparse.ArgumentParser(description="2D J1-J2 Heisenberg C4 PEPS (PyTorch)")
     parser.add_argument("--chi", type=int, default=DEFAULT_CONFIG["chi"])
     parser.add_argument("--d", type=int, default=DEFAULT_CONFIG["d"])
     parser.add_argument("--D", type=int, default=DEFAULT_CONFIG["D"])
     parser.add_argument("--seed", type=int, default=DEFAULT_CONFIG["seed"])
+    parser.add_argument("--j1", type=float, default=DEFAULT_CONFIG["j1"])
+    parser.add_argument("--j2", type=float, default=DEFAULT_CONFIG["j2"])
     parser.add_argument("--ADiter", type=int, default=DEFAULT_CONFIG["ADiter"])
     parser.add_argument("--warmup", type=int, default=DEFAULT_CONFIG["warmup"])
     parser.add_argument("--warmupiter", type=int, default=DEFAULT_CONFIG["warmupiter"])
