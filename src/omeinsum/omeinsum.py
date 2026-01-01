@@ -67,7 +67,7 @@ class OMEinsum(nn.Module):
         self._path_logged = False
         self._path_optimizer = None
         if self.force_block_dim_first:
-            self._path_optimizer = _BlockFirstOptimizer(self.tidx)
+            self._path_optimizer = _BlockFirstOptimizer(self.tidx, tail_optimize=self.optimize)
 
     def forward(self, *tensors: torch.Tensor) -> torch.Tensor:
         return self._forward(*tensors)
@@ -140,8 +140,9 @@ class OMEinsum(nn.Module):
 
 
 class _BlockFirstOptimizer(opt_einsum.paths.PathOptimizer):
-    def __init__(self, tidx: int) -> None:
+    def __init__(self, tidx: int, tail_optimize: str | opt_einsum.paths.PathOptimizer | None = None) -> None:
         self.tidx = tidx
+        self.tail_optimize = tail_optimize or "greedy"
 
     @staticmethod
     def _estimate_size(indices: frozenset[str], size_dict: dict[str, int]) -> int:
@@ -204,6 +205,35 @@ class _BlockFirstOptimizer(opt_einsum.paths.PathOptimizer):
             inputs.pop(idx)
         inputs.append(best_k12)
 
-        sub_path = opt_einsum.paths.greedy(inputs, output, size_dict, memory_limit)
+        sub_path = self._tail_path(inputs, output, size_dict, memory_limit)
         path.extend(sub_path)
         return path
+
+    def _tail_path(
+        self,
+        inputs: list[frozenset[str]],
+        output: frozenset[str],
+        size_dict: dict[str, int],
+        memory_limit: int | None,
+    ):
+        opt = self.tail_optimize
+        if isinstance(opt, opt_einsum.paths.PathOptimizer):
+            return opt(inputs, output, size_dict, memory_limit)
+        if callable(opt) and not isinstance(opt, str):
+            return opt(inputs, output, size_dict, memory_limit)
+        if isinstance(opt, str):
+            if opt == "optimal":
+                return opt_einsum.paths.optimal(inputs, output, size_dict, memory_limit)
+            if opt.startswith("branch"):
+                parts = opt.split("-", 1)
+                nbranch = int(parts[1]) if len(parts) > 1 else 1
+                return opt_einsum.paths.branch(
+                    inputs,
+                    output,
+                    size_dict,
+                    memory_limit,
+                    nbranch=nbranch,
+                )
+            if opt in ("auto", "greedy"):
+                return opt_einsum.paths.greedy(inputs, output, size_dict, memory_limit)
+        return opt_einsum.paths.greedy(inputs, output, size_dict, memory_limit)
