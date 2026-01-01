@@ -18,6 +18,8 @@ class OMEinsum(nn.Module):
         batch_size: int = 16,
         use_checkpoint: bool = False,
         use_reentrant: bool = False,
+        force_block_dim_first: bool = False,
+        log_path: bool = True,
         optimize: str | bool | None = "auto",
     ) -> None:
         super().__init__()
@@ -26,6 +28,8 @@ class OMEinsum(nn.Module):
         self.batch_size = batch_size
         self.use_checkpoint = use_checkpoint
         self.use_reentrant = use_reentrant
+        self.force_block_dim_first = force_block_dim_first
+        self.log_path = log_path
         self.optimize = optimize
 
         if not isinstance(self.batch_size, int) or self.batch_size <= 0:
@@ -58,6 +62,10 @@ class OMEinsum(nn.Module):
 
         self._path = None
         self._path_shapes: tuple[tuple[int, ...], ...] | None = None
+        self._path_logged = False
+        self._path_optimizer = None
+        if self.force_block_dim_first:
+            self._path_optimizer = _BlockFirstOptimizer(self.tidx)
 
     def forward(self, *tensors: torch.Tensor) -> torch.Tensor:
         return self._forward(*tensors)
@@ -78,9 +86,19 @@ class OMEinsum(nn.Module):
     def _get_path(self, tensors: Sequence[torch.Tensor]):
         shapes = tuple(tuple(t.shape) for t in tensors)
         if self._path is None or self._path_shapes != shapes:
-            path, _ = opt_einsum.contract_path(self.equation, *tensors, optimize=self.optimize)
+            optimize = self._path_optimizer or self.optimize
+            path, info = opt_einsum.contract_path(self.equation, *tensors, optimize=optimize)
             self._path = path
             self._path_shapes = shapes
+            if self.log_path and not self._path_logged:
+                print(
+                    f"[OMEinsum] eq={self.equation} block_dim={self.block_dim} "
+                    f"batch_size={self.batch_size} force_block_dim_first={self.force_block_dim_first} "
+                    f"optimize={optimize}",
+                    flush=True,
+                )
+                print(info, flush=True)
+                self._path_logged = True
         return self._path
 
     def _forward(self, *tensors: torch.Tensor) -> torch.Tensor:
@@ -117,3 +135,60 @@ class OMEinsum(nn.Module):
             self.use_checkpoint,
             self.use_reentrant,
         )
+
+
+class _BlockFirstOptimizer(opt_einsum.paths.PathOptimizer):
+    def __init__(self, tidx: int) -> None:
+        self.tidx = tidx
+
+    @staticmethod
+    def _result_indices(
+        left: frozenset[str],
+        right: frozenset[str],
+        output: frozenset[str],
+    ) -> frozenset[str]:
+        contracted = (left & right) - output
+        return (left | right) - contracted
+
+    @staticmethod
+    def _estimate_size(indices: frozenset[str], size_dict: dict[str, int]) -> int:
+        size = 1
+        for idx in indices:
+            size *= size_dict[idx]
+        return size
+
+    def __call__(
+        self,
+        inputs: list[frozenset[str]],
+        output: frozenset[str],
+        size_dict: dict[str, int],
+        memory_limit: int | None = None,
+    ):
+        inputs = list(inputs)
+        if self.tidx >= len(inputs):
+            return opt_einsum.paths.greedy(inputs, output, size_dict, memory_limit)
+
+        bidx = self.tidx
+        best_j = None
+        best_size = None
+        for j in range(len(inputs)):
+            if j == bidx:
+                continue
+            res_idx = self._result_indices(inputs[bidx], inputs[j], output)
+            size = self._estimate_size(res_idx, size_dict)
+            if best_size is None or size < best_size:
+                best_size = size
+                best_j = j
+
+        if best_j is None:
+            return opt_einsum.paths.greedy(inputs, output, size_dict, memory_limit)
+
+        path = [(bidx, best_j)]
+        res_idx = self._result_indices(inputs[bidx], inputs[best_j], output)
+        for idx in sorted((bidx, best_j), reverse=True):
+            inputs.pop(idx)
+        inputs.append(res_idx)
+
+        sub_path = opt_einsum.paths.greedy(inputs, output, size_dict, memory_limit)
+        path.extend(sub_path)
+        return path
