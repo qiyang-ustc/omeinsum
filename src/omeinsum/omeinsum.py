@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Sequence
 
+from collections import defaultdict
+
 import opt_einsum
 import torch
 import torch.nn as nn
@@ -142,20 +144,8 @@ class _BlockFirstOptimizer(opt_einsum.paths.PathOptimizer):
         self.tidx = tidx
 
     @staticmethod
-    def _result_indices(
-        left: frozenset[str],
-        right: frozenset[str],
-        output: frozenset[str],
-    ) -> frozenset[str]:
-        contracted = (left & right) - output
-        return (left | right) - contracted
-
-    @staticmethod
     def _estimate_size(indices: frozenset[str], size_dict: dict[str, int]) -> int:
-        size = 1
-        for idx in indices:
-            size *= size_dict[idx]
-        return size
+        return opt_einsum.paths.compute_size_by_dict(indices, size_dict)
 
     def __call__(
         self,
@@ -168,26 +158,51 @@ class _BlockFirstOptimizer(opt_einsum.paths.PathOptimizer):
         if self.tidx >= len(inputs):
             return opt_einsum.paths.greedy(inputs, output, size_dict, memory_limit)
 
-        bidx = self.tidx
-        best_j = None
-        best_size = None
-        for j in range(len(inputs)):
-            if j == bidx:
-                continue
-            res_idx = self._result_indices(inputs[bidx], inputs[j], output)
-            size = self._estimate_size(res_idx, size_dict)
-            if best_size is None or size < best_size:
-                best_size = size
-                best_j = j
+        output = frozenset(output) | frozenset.intersection(*inputs)
 
-        if best_j is None:
+        dim_to_keys: dict[str, set[frozenset[str]]] = defaultdict(set)
+        for key in inputs:
+            for dim in key - output:
+                dim_to_keys[dim].add(key)
+
+        dim_ref_counts = {
+            count: {dim for dim, keys in dim_to_keys.items() if len(keys) >= count} - output
+            for count in (2, 3)
+        }
+        footprints = {key: self._estimate_size(key, size_dict) for key in inputs}
+
+        bidx = self.tidx
+        k1 = inputs[bidx]
+        candidates = [j for j in range(len(inputs)) if j != bidx]
+        shared = [j for j in candidates if k1 & inputs[j]]
+        if shared:
+            candidates = shared
+
+        best_j = None
+        best_cost = None
+        best_k12 = None
+        best_size = None
+        for j in candidates:
+            k2 = inputs[j]
+            either = k1 | k2
+            two = k1 & k2
+            one = either - two
+            k12 = (either & output) | (two & dim_ref_counts[3]) | (one & dim_ref_counts[2])
+            size12 = self._estimate_size(k12, size_dict)
+            cost = size12 - footprints[k1] - footprints[k2]
+            if best_cost is None or cost < best_cost or (cost == best_cost and size12 < best_size):
+                best_cost = cost
+                best_size = size12
+                best_j = j
+                best_k12 = k12
+
+        if best_j is None or best_k12 is None:
             return opt_einsum.paths.greedy(inputs, output, size_dict, memory_limit)
 
         path = [(bidx, best_j)]
-        res_idx = self._result_indices(inputs[bidx], inputs[best_j], output)
         for idx in sorted((bidx, best_j), reverse=True):
             inputs.pop(idx)
-        inputs.append(res_idx)
+        inputs.append(best_k12)
 
         sub_path = opt_einsum.paths.greedy(inputs, output, size_dict, memory_limit)
         path.extend(sub_path)
