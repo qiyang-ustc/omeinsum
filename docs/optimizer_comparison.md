@@ -2,179 +2,84 @@
 
 This report compares contraction path optimizers on extreme tensor network cases.
 
-## Summary Table
+## Important Note on FLOP Counting
 
-| Case | Optimizer | FLOPs (log10) | Max Intermediate | Contractions |
-|------|-----------|---------------|------------------|--------------|
-| Heisenberg | opt_einsum(greedy) | 7.95 | 147,456 | 4 |
-| Heisenberg | opt_einsum(optimal) | 7.52 | 294,912 | 4 |
-| Heisenberg | opt_einsum(branch-2) | 7.52 | 294,912 | 4 |
-| Heisenberg | omeco(greedy) | 7.65 | 147,455 | 4 |
-| Heisenberg | omeco(treesa) | 7.22 | 294,911 | 4 |
-| Heisenberg | omeco(treesa_slicer) | 7.22 | 294,911 | 4 |
-| Kitaev | opt_einsum(greedy) | 7.79 | 102,400 | 6 |
-| Kitaev | opt_einsum(optimal) | 7.09 | 102,400 | 6 |
-| Kitaev | opt_einsum(branch-2) | 7.31 | 51,200 | 6 |
-| Kitaev | omeco(greedy) | 7.49 | 102,399 | 6 |
-| Kitaev | omeco(treesa) | 6.79 | 102,399 | 6 |
-| Kitaev | omeco(treesa_slicer) | 6.79 | 102,399 | 6 |
+**The two libraries use different conventions:**
+- **opt_einsum**: Counts multiply-add as 2 operations
+- **omeco**: Counts multiply-add as 1 operation (MAC)
+
+All comparisons below are **normalized** (opt_einsum values divided by 2) for fair comparison.
+
+## Summary
+
+After normalization, the comparison shows:
+
+| Case | Result |
+|------|--------|
+| **Heisenberg (5 tensors)** | Both find same quality paths (1.0x) |
+| **Kitaev (7 tensors)** | opt_einsum(optimal) is better (~0.5-0.6x) |
+
+**Key Finding:** For the more complex 7-tensor Kitaev case, opt_einsum's dynamic programming `optimal` method finds better paths than omeco's TreeSA simulated annealing.
+
+## Benchmark Results
+
+### D=8
+
+| chi | Heisenberg (opt/omeco) | Kitaev (opt/omeco) |
+|-----|------------------------|-------------------|
+| 64  | 1.00x | 0.62x |
+| 128 | 1.00x | 0.56x |
+| 192 | 1.00x | 0.54x |
+| 256 | 1.00x | 0.53x |
+
+### D=12
+
+| chi | Heisenberg (opt/omeco) | Kitaev (opt/omeco) |
+|-----|------------------------|-------------------|
+| 144 | 1.00x | 0.58x |
+| 192 | 1.00x | 0.56x |
+| 256 | 1.00x | 0.55x |
+
+**Note:** Ratio < 1.0 means opt_einsum uses fewer FLOPs (better).
 
 ## Test Cases
 
 ### Heisenberg iPEPS (5 tensors)
-
-**Equation:** `ibfj,iaep,xabcd,xefgh,jcgq->pdhq`
-
-**Parameters:** chi=24, d=2, D=4
-
-**Tensor shapes:**
-- T: (24, 4, 4, 24) - transfer tensor
-- v1: (24, 4, 4, 24) - isometry
-- M: (2, 4, 4, 4, 4) - bulk PEPS tensor
-- M*: (2, 4, 4, 4, 4) - conjugate bulk tensor
-- v2: (24, 4, 4, 24) - isometry
+- **Equation:** `ibfj,iaep,xabcd,xefgh,jcgq->pdhq`
+- **Parameters:** d=2, varying D and chi
 
 ### Kitaev iPEPS (7 tensors)
-
-**Equation:** `iABt,ijkl,xjAp,xkBq,yJap,yKbq,labc->tJKc`
-
-**Parameters:** chi=20, d=2, D=4
-
-**Tensor shapes:**
-- v*: (20, 4, 4, 20) - conjugate isometry
-- R: (20, 4, 4, 20) - row transfer tensor
-- M: (2, 4, 4, 4) - bulk tensor (appears 4 times with different indices)
-- v: (20, 4, 4, 20) - isometry
-
-## Detailed Results
-
-### Heisenberg Case Details
-
-#### opt_einsum(greedy)
-
-- **FLOPs (log10):** 7.95
-- **Max Intermediate Size:** 147,456 elements
-- **Number of Contractions:** 4
-
-**Path:** `[(2, 3), (0, 1), (1, 2), (0, 1)]`
-
-#### opt_einsum(optimal)
-
-- **FLOPs (log10):** 7.52
-- **Max Intermediate Size:** 294,912 elements
-- **Number of Contractions:** 4
-
-**Path:** `[(0, 1), (0, 3), (0, 2), (0, 1)]`
-
-#### opt_einsum(branch-2)
-
-- **FLOPs (log10):** 7.52
-- **Max Intermediate Size:** 294,912 elements
-- **Number of Contractions:** 4
-
-**Path:** `[(0, 1), (0, 3), (0, 2), (0, 1)]`
-
-#### omeco(greedy)
-
-- **FLOPs (log10):** 7.65
-- **Max Intermediate Size:** 147,455 elements
-- **Number of Contractions:** 4
-
-#### omeco(treesa)
-
-- **FLOPs (log10):** 7.22
-- **Max Intermediate Size:** 294,911 elements
-- **Number of Contractions:** 4
-
-#### omeco(treesa_slicer)
-
-- **FLOPs (log10):** 7.22
-- **Max Intermediate Size:** 294,911 elements
-- **Number of Contractions:** 4
-
-### Kitaev Case Details
-
-#### opt_einsum(greedy)
-
-- **FLOPs (log10):** 7.79
-- **Max Intermediate Size:** 102,400 elements
-- **Number of Contractions:** 6
-
-**Path:** `[(2, 4), (2, 3), (3, 4), (0, 1), (1, 2), (0, 1)]`
-
-#### opt_einsum(optimal)
-
-- **FLOPs (log10):** 7.09
-- **Max Intermediate Size:** 102,400 elements
-- **Number of Contractions:** 6
-
-**Path:** `[(0, 1), (0, 5), (0, 4), (0, 3), (0, 2), (0, 1)]`
-
-#### opt_einsum(branch-2)
-
-- **FLOPs (log10):** 7.31
-- **Max Intermediate Size:** 51,200 elements
-- **Number of Contractions:** 6
-
-**Path:** `[(2, 4), (0, 2), (1, 2), (0, 2), (0, 2), (0, 1)]`
-
-#### omeco(greedy)
-
-- **FLOPs (log10):** 7.49
-- **Max Intermediate Size:** 102,399 elements
-- **Number of Contractions:** 6
-
-#### omeco(treesa)
-
-- **FLOPs (log10):** 6.79
-- **Max Intermediate Size:** 102,399 elements
-- **Number of Contractions:** 6
-
-#### omeco(treesa_slicer)
-
-- **FLOPs (log10):** 6.79
-- **Max Intermediate Size:** 102,399 elements
-- **Number of Contractions:** 6
-
-## Interpretation
-
-- **FLOPs (log10):** Lower is better. Represents total floating-point operations.
-- **Max Intermediate:** Lower is better. Peak memory usage during contraction.
-- **TreeSA** uses simulated annealing and typically finds better paths than greedy.
-- **TreeSASlicer** can reduce memory by slicing indices at the cost of more FLOPs.
+- **Equation:** `iABt,ijkl,xjAp,xkBq,yJap,yKbq,labc->tJKc`
+- **Parameters:** d=2, varying D and chi
 
 ## Conclusions
 
-### Key Findings
+### Why the Earlier Report Was Misleading
 
-1. **omeco(treesa) consistently outperforms opt_einsum(optimal):**
-   - Heisenberg: 10^7.22 vs 10^7.52 FLOPs (**2x fewer operations**)
-   - Kitaev: 10^6.79 vs 10^7.09 FLOPs (**2x fewer operations**)
+The initial analysis showed "2x speedup" for omeco, but this was entirely due to:
+1. opt_einsum counting multiply-add as 2 FLOPs
+2. omeco counting multiply-add as 1 FLOP
 
-2. **omeco(greedy) outperforms opt_einsum(greedy):**
-   - Heisenberg: 10^7.65 vs 10^7.95 FLOPs (**2x fewer operations**)
-   - Kitaev: 10^7.49 vs 10^7.79 FLOPs (**2x fewer operations**)
+After normalizing for this difference, the actual path quality comparison shows:
+- For simple cases (5 tensors): equivalent performance
+- For complex cases (7 tensors): opt_einsum's DP algorithm is superior
 
-3. **Memory usage is comparable** between the two libraries for similar algorithms.
+### Recommendations
 
-### Recommendation
+1. **For 5-tensor contractions** (like Heisenberg CTMRG): Either optimizer works equally well
 
-Based on this analysis, **omeco is recommended** as the default path optimizer for the following reasons:
+2. **For 7+ tensor contractions** (like Kitaev CTMRG): opt_einsum's `optimal` method finds better paths
 
-1. **Better path quality:** TreeSA finds paths with ~2x fewer FLOPs than opt_einsum's optimal method
-2. **Fast greedy:** Even omeco's greedy method outperforms opt_einsum's greedy
-3. **Rust performance:** omeco is implemented in Rust with Python bindings, providing fast optimization
-4. **Active development:** omeco is a port of OMEinsumContractionOrders.jl with ongoing improvements
+3. **For very large tensor networks** (10+ tensors): opt_einsum's `optimal` becomes exponentially slow; omeco's TreeSA may be more practical
 
-### Migration Path
+### When omeco May Still Be Useful
 
-1. Start by adding omeco as an optional optimizer (current implementation)
-2. Run validation tests on production workloads
-3. If results are satisfactory, consider making omeco the default
-4. Eventually, opt_einsum dependency could be reduced to just the contraction execution
+- **Speed of optimization**: TreeSA is faster than DP for large networks
+- **Slicing support**: TreeSASlicer can reduce memory at cost of more computation
+- **Custom scoring**: More flexible optimization objectives
 
-## Notes
+## Plots
 
-- opt_einsum's `optimal` method uses dynamic programming (exponential in tensor count).
-- omeco is a Rust library providing fast path optimization for tensor networks.
-- These are theoretical complexity estimates; actual runtime depends on hardware.
+See:
+- `docs/benchmark_flops_vs_chi.png` - FLOPs vs chi comparison
+- `docs/benchmark_speedup.png` - Speedup ratio plot
