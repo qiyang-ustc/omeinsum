@@ -2,72 +2,118 @@
 
 ## 摘要
 
-我们对 omeco TreeSA 在 Kitaev CTMRG 方程上进行了详细分析，发现了一个有趣的现象。
+我们对 omeco TreeSA 在 Kitaev CTMRG 方程上进行了全面的性能分析，包括 CPU、GPU 纯收缩以及 GPU + 自动微分 (AD) 场景。
 
-## 发现
+**核心发现：TreeSA 优化的是空间复杂度 (sc)，而非时间复杂度 (tc)。这导致 FLOP 更多但中间张量更小。**
 
-**FLOP 计数 vs 实际运行时间不一致：**
+---
 
-当 d/D < 0.5 时，TreeSA 找到的路径理论上有更多 FLOP，但**实际运行更快**。
-
-## 详细数据
-
-### 理论 FLOP 对比
+## 1. 理论 FLOP 对比
 
 Kitaev 方程：`iABt,ijkl,xjAp,xkBq,yJap,yKbq,labc->tJKc`
 
-| d | D | d/D | FLOP 比 (omeco/opt) |
-|---|---|-----|---------------------|
-| 2 | 4 | 0.50 | 1.00x |
-| 2 | 6 | 0.33 | 1.56x |
-| 2 | 8 | 0.25 | 1.45x |
-| 3 | 8 | 0.38 | 1.88x |
-| 4 | 8 | 0.50 | 1.00x |
+| chi | d | D | d/D | FLOP比 (omeco/opt) |
+|-----|---|---|-----|---------------------|
+| 16 | 2 | 4 | 0.50 | 1.00x |
+| 16 | 2 | 6 | 0.33 | 1.00x |
+| 24 | 2 | 8 | 0.25 | 1.24x |
+| 32 | 2 | 6 | 0.33 | 1.48x |
+| 40 | 2 | 6 | 0.33 | 1.56x |
+| 48 | 2 | 6 | 0.33 | 1.61x |
+| 64 | 2 | 6 | 0.33 | 1.69x |
+| 64 | 2 | 8 | 0.25 | 1.61x |
 
-### 实际运行时间对比 (CPU, chi=40, d=2, D=6)
+**规律：**
+- d/D >= 0.5: 两者找到相同路径 (1.00x)
+- d/D < 0.5 且 chi 较大: omeco 有更多 FLOP (1.2x-1.7x)
 
-| 方法 | FLOP | 最大中间张量 | 运行时间 |
-|------|------|-------------|----------|
-| opt_einsum(optimal) | 4.48e+8 | **2.07e+6** | 14.7ms |
-| omeco(TreeSA) | 6.97e+8 | **6.91e+5** | 10.9ms |
+---
 
-**关键发现：**
-- omeco 有 1.56x 更多 FLOP
-- 但 omeco 最大中间张量小 **3 倍**
-- omeco 实际运行快 **0.74x**
+## 2. 路径结构对比 (chi=40, d=2, D=6)
 
-## 路径对比
+| 指标 | opt_einsum(optimal) | omeco(TreeSA) |
+|------|---------------------|---------------|
+| FLOP count | 2.24e+08 | 3.48e+08 (1.56x) |
+| **最大中间张量** | **2.07e+06** | **6.91e+05** (3x 更小) |
+| tc (log2 FLOP) | 27.74 | 28.38 |
+| sc (log2 space) | 20.98 | 19.40 |
 
-```
-opt_einsum path: [(0, 1), (0, 5), (0, 4), (0, 3), (0, 2), (0, 1)]
-  Largest intermediate: 2,074,000 elements
+**TreeSA 生成的路径有更多 FLOP，但中间张量小 3 倍。**
 
-omeco path: [(4, 6), (0, 2), (0, 1), (2, 3), (0, 2), (0, 1)]
-  Largest intermediate: 691,200 elements (3x smaller!)
-```
+---
 
-## 分析
+## 3. CPU 运行时间
 
-TreeSA 似乎在优化**内存效率**而非单纯的 FLOP 数。较小的中间张量带来：
-1. 更好的 CPU 缓存利用率
-2. 更少的内存分配/释放开销
-3. 更快的实际运行时间
+测试环境：Apple Silicon (M-series)
 
-## 问题
+| chi | d | D | FLOP比 | 运行时间比 | 结论 |
+|-----|---|---|--------|----------|------|
+| 32 | 2 | 6 | 1.48x | 0.89x | omeco 更快 |
+| 36 | 2 | 6 | 1.52x | 0.62x | omeco 更快 |
+| 40 | 2 | 6 | 1.56x | **0.52x** | omeco 更快 |
 
-1. TreeSA 的代价函数是什么？是否有意优化内存占用？
+**CPU 结论：尽管 FLOP 多 50%，omeco 路径快 2 倍！** 原因是更小的中间张量带来更好的缓存利用率。
 
-2. 为什么 d/D >= 0.5 时两种方法找到相同路径，而 d/D < 0.5 时不同？
+---
 
-3. 如果 TreeSA 确实在优化内存效率，这对 GPU 场景如何？（GPU 通常更受 FLOP 限制）
+## 4. GPU 纯收缩
 
-## 复现代码
+测试环境：NVIDIA H100, float64
+
+| chi | d | D | FLOP比 | 运行时间比 |
+|-----|---|---|--------|----------|
+| 32 | 2 | 6 | 1.48x | 0.95x |
+| 64 | 2 | 6 | 1.69x | 1.00x |
+| 96 | 2 | 6 | 1.78x | 0.96x |
+| 128 | 2 | 6 | 1.83x | 0.98x |
+
+**GPU 结论：两者运行时间相当 (~1.0x)。** GPU 高带宽抵消了内存效率优势。
+
+---
+
+## 5. GPU + 自动微分 (AD)
+
+测试环境：NVIDIA H100, complex128, forward + backward
+
+| chi | d | D | FLOP比 | 运行时间比 |
+|-----|---|---|--------|----------|
+| 48 | 2 | 6 | 1.61x | 1.11x |
+| 64 | 2 | 6 | 1.69x | 1.10x |
+| 48 | 2 | 8 | 1.52x | **0.96x** |
+| 64 | 2 | 8 | 1.61x | **1.00x** |
+
+**GPU+AD 结论：两者基本持平，omeco 有时略快。**
+
+---
+
+## 6. 总结
+
+| 场景 | FLOP比 | 运行时间比 | 推荐 |
+|------|--------|----------|------|
+| **CPU** | 1.5x | **0.5-0.7x** | omeco 更快 |
+| **GPU** | 1.5-1.8x | ~1.0x | 两者相当 |
+| **GPU+AD** | 1.5-1.7x | ~1.0x | 两者相当 |
+
+---
+
+## 7. 问题
+
+1. **TreeSA 的代价函数是什么？** 从结果看，它似乎在优化 `tc + α·sc` 的组合，而非纯 tc。
+
+2. **这是有意设计还是意外？** 对于内存受限的场景（如大规模张量网络），优化 sc 可能更实用。
+
+3. **是否有参数可以调整 tc/sc 的权重？** 比如让 TreeSA 更侧重 FLOP 优化？
+
+4. **d/D < 0.5 时路径分歧的原因？** 是搜索空间的特性还是代价函数的特性？
+
+---
+
+## 8. 复现代码
 
 ```python
 import omeco
 import opt_einsum
 import numpy as np
-import time
 
 equation = 'iABt,ijkl,xjAp,xkBq,yJap,yKbq,labc->tJKc'
 chi, d, D = 40, 2, 6
@@ -97,13 +143,19 @@ sizes = {char_to_int[c]: s for sub, shape in zip(subscripts, shapes)
 
 tree = omeco.optimize_code(ixs, out, sizes, omeco.TreeSA())
 comp = omeco.contraction_complexity(tree, ixs, sizes)
+print(f'omeco tc (log2 FLOP): {comp.tc:.2f}')
+print(f'omeco sc (log2 space): {comp.sc:.2f}')
 print(f'omeco FLOP: {2**comp.tc:.2e}')
-print(f'omeco sc (log2 largest): {comp.sc}')
 print(f'omeco largest: {2**comp.sc:.2e} elements')
 ```
+
+---
 
 ## 环境
 
 - omeco 0.2.0
-- Python 3.13
-- macOS (Apple Silicon)
+- opt_einsum 3.3.0
+- Python 3.11/3.12
+- PyTorch 2.x
+- CPU: Apple Silicon
+- GPU: NVIDIA H100
