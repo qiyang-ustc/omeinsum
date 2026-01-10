@@ -1,41 +1,65 @@
-# omeco TreeSA 在 d/D < 0.5 时的问题
+# omeco TreeSA 分析报告
+
+## 摘要
+
+我们对 omeco TreeSA 在 Kitaev CTMRG 方程上进行了详细分析，发现了一个有趣的现象。
 
 ## 发现
 
-我们在测试 omeco 时发现一个规律：**当 d/D < 0.5 时，TreeSA 找到的路径比 opt_einsum(optimal) 差 1.6x-2.2x**。
+**FLOP 计数 vs 实际运行时间不一致：**
 
-## 测试数据
+当 d/D < 0.5 时，TreeSA 找到的路径理论上有更多 FLOP，但**实际运行更快**。
 
-Kitaev CTMRG 方程：`iABt,ijkl,xjAp,xkBq,yJap,yKbq,labc->tJKc`
+## 详细数据
 
-| d | D | d/D | omeco/opt_einsum | 状态 |
-|---|---|-----|------------------|------|
-| 2 | 4 | 0.50 | 1.00x | OK |
-| 3 | 4 | 0.75 | 1.00x | OK |
-| 4 | 4 | 1.00 | 1.00x | OK |
-| 2 | 6 | 0.33 | 1.69x | **FAIL** |
-| 3 | 6 | 0.50 | 1.00x | OK |
-| 2 | 8 | 0.25 | 1.61x | **FAIL** |
-| 3 | 8 | 0.38 | 2.18x | **FAIL** |
-| 4 | 8 | 0.50 | 1.00x | OK |
+### 理论 FLOP 对比
 
-**规律**：d/D >= 0.5 时正常，d/D < 0.5 时异常。
+Kitaev 方程：`iABt,ijkl,xjAp,xkBq,yJap,yKbq,labc->tJKc`
 
-## 实际影响
+| d | D | d/D | FLOP 比 (omeco/opt) |
+|---|---|-----|---------------------|
+| 2 | 4 | 0.50 | 1.00x |
+| 2 | 6 | 0.33 | 1.56x |
+| 2 | 8 | 0.25 | 1.45x |
+| 3 | 8 | 0.38 | 1.88x |
+| 4 | 8 | 0.50 | 1.00x |
 
-对于自旋-1/2系统 (d=2)：
-- D=4: 正常
-- D=5,6,7,8,...: TreeSA 找到次优路径
+### 实际运行时间对比 (CPU, chi=40, d=2, D=6)
 
-## 排除的可能性
+| 方法 | FLOP | 最大中间张量 | 运行时间 |
+|------|------|-------------|----------|
+| opt_einsum(optimal) | 4.48e+8 | **2.07e+6** | 14.7ms |
+| omeco(TreeSA) | 6.97e+8 | **6.91e+5** | 10.9ms |
 
-已测试但无效的调整：
-1. ❌ 增加迭代次数 (ntrials=100, niters=200)
-2. ❌ 改变温度参数 (各种 betas)
-3. ❌ 改变索引排序方式
-4. ❌ 使用 `optimize_treesa()` 而非 `optimize_code()`
+**关键发现：**
+- omeco 有 1.56x 更多 FLOP
+- 但 omeco 最大中间张量小 **3 倍**
+- omeco 实际运行快 **0.74x**
 
-TreeSA 每次返回完全相同的结果（无随机性），说明它稳定收敛到一个局部最优。
+## 路径对比
+
+```
+opt_einsum path: [(0, 1), (0, 5), (0, 4), (0, 3), (0, 2), (0, 1)]
+  Largest intermediate: 2,074,000 elements
+
+omeco path: [(4, 6), (0, 2), (0, 1), (2, 3), (0, 2), (0, 1)]
+  Largest intermediate: 691,200 elements (3x smaller!)
+```
+
+## 分析
+
+TreeSA 似乎在优化**内存效率**而非单纯的 FLOP 数。较小的中间张量带来：
+1. 更好的 CPU 缓存利用率
+2. 更少的内存分配/释放开销
+3. 更快的实际运行时间
+
+## 问题
+
+1. TreeSA 的代价函数是什么？是否有意优化内存占用？
+
+2. 为什么 d/D >= 0.5 时两种方法找到相同路径，而 d/D < 0.5 时不同？
+
+3. 如果 TreeSA 确实在优化内存效率，这对 GPU 场景如何？（GPU 通常更受 FLOP 限制）
 
 ## 复现代码
 
@@ -43,16 +67,19 @@ TreeSA 每次返回完全相同的结果（无随机性），说明它稳定收�
 import omeco
 import opt_einsum
 import numpy as np
+import time
 
 equation = 'iABt,ijkl,xjAp,xkBq,yJap,yKbq,labc->tJKc'
-chi, d, D = 64, 2, 8  # d/D = 0.25 < 0.5, 会有问题
+chi, d, D = 40, 2, 6
+
 shapes = [(chi,D,D,chi), (chi,D,D,chi), (d,D,D,D), (d,D,D,D),
           (d,D,D,D), (d,D,D,D), (chi,D,D,chi)]
 
 # opt_einsum
-arrays = [np.empty(s) for s in shapes]
-_, info = opt_einsum.contract_path(equation, *arrays, optimize='optimal')
-opt_flops = float(info.opt_cost) / 2  # 归一化 MAC 计数
+arrays = [np.random.randn(*s) for s in shapes]
+path_opt, info_opt = opt_einsum.contract_path(equation, *arrays, optimize='optimal')
+print(f'opt_einsum FLOP: {float(info_opt.opt_cost)/2:.2e}')
+print(f'opt_einsum largest: {info_opt.largest_intermediate:.2e} elements')
 
 # omeco
 input_part, output_part = equation.split('->')
@@ -70,17 +97,10 @@ sizes = {char_to_int[c]: s for sub, shape in zip(subscripts, shapes)
 
 tree = omeco.optimize_code(ixs, out, sizes, omeco.TreeSA())
 comp = omeco.contraction_complexity(tree, ixs, sizes)
-omeco_flops = 2 ** comp.tc
-
-print(f'opt_einsum: {opt_flops:.2e}')
-print(f'omeco:      {omeco_flops:.2e}')
-print(f'ratio:      {omeco_flops/opt_flops:.2f}x')
-# 输出: ratio: 1.61x
+print(f'omeco FLOP: {2**comp.tc:.2e}')
+print(f'omeco sc (log2 largest): {comp.sc}')
+print(f'omeco largest: {2**comp.sc:.2e} elements')
 ```
-
-## 问题
-
-这是预期行为还是 bug？如果是预期行为，有什么方法可以改善 d/D < 0.5 情况下的结果？
 
 ## 环境
 
