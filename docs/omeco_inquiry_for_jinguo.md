@@ -96,15 +96,24 @@ Kitaev 方程：`iABt,ijkl,xjAp,xkBq,yJap,yKbq,labc->tJKc`
 
 ---
 
-## 7. 问题
+## 7. 解决方案：使用 ScoreFunction
 
-1. **TreeSA 的代价函数是什么？** 从结果看，它似乎在优化 `tc + α·sc` 的组合，而非纯 tc。
+**问题根源：默认 `ScoreFunction(tc_weight=1.0, sc_weight=1.0)` 同时优化 tc 和 sc。**
 
-2. **这是有意设计还是意外？** 对于内存受限的场景（如大规模张量网络），优化 sc 可能更实用。
+使用 `sc_weight=0` 可以只优化 time complexity：
 
-3. **是否有参数可以调整 tc/sc 的权重？** 比如让 TreeSA 更侧重 FLOP 优化？
+```python
+score_tc_only = omeco.ScoreFunction(tc_weight=1.0, sc_weight=0.0)
+tree = omeco.optimize_code(ixs, out, sizes, omeco.TreeSA(score=score_tc_only))
+```
 
-4. **d/D < 0.5 时路径分歧的原因？** 是搜索空间的特性还是代价函数的特性？
+| 配置 | chi=40, D=6 | chi=64, D=6 |
+|------|-------------|-------------|
+| opt_einsum(optimal) | tc=27.74 | tc=29.63 |
+| TreeSA 默认 (sc=1) | tc=28.38 (1.56x) | tc=30.38 (1.69x) |
+| **TreeSA tc_only (sc=0)** | **tc=27.74 (1.00x)** | **tc=29.63 (1.00x)** |
+
+**结论：`sc_weight=0` 时 TreeSA 和 opt_einsum 找到完全相同的 tc！**
 
 ---
 

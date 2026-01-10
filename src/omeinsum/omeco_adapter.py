@@ -129,15 +129,18 @@ class OmecoOptimizer:
 
     Args:
         method: Optimization method - "greedy", "treesa", or "treesa_slicer"
+        optimize_tc: If True, optimize only time complexity (sc_weight=0).
+                     If False (default), uses default balanced optimization.
         **kwargs: Additional arguments passed to the omeco method
     """
 
-    def __init__(self, method: str = "greedy", **kwargs) -> None:
+    def __init__(self, method: str = "greedy", optimize_tc: bool = False, **kwargs) -> None:
         if not OMECO_AVAILABLE:
             raise ImportError(
                 "omeco is not installed. Install it with: pip install omeco"
             )
         self.method = method
+        self.optimize_tc = optimize_tc
         self.kwargs = kwargs
 
     def _get_method_object(self):
@@ -152,7 +155,16 @@ class OmecoOptimizer:
                 f"Unknown omeco method: {self.method}. "
                 f"Available: {list(method_map.keys())}"
             )
-        return method_map[self.method](**self.kwargs)
+
+        kwargs = self.kwargs.copy()
+
+        # For TreeSA, support optimize_tc mode
+        if self.method == "treesa" and self.optimize_tc:
+            if "score" not in kwargs:
+                # Use tc-only score function (sc_weight=0)
+                kwargs["score"] = omeco.ScoreFunction(tc_weight=1.0, sc_weight=0.0)
+
+        return method_map[self.method](**kwargs)
 
     def __call__(
         self,
@@ -198,6 +210,7 @@ def get_omeco_complexity(
     equation: str,
     shapes: Sequence[tuple[int, ...]],
     method: str = "greedy",
+    optimize_tc: bool = False,
     **kwargs,
 ) -> dict:
     """
@@ -207,6 +220,7 @@ def get_omeco_complexity(
         equation: Einsum equation
         shapes: Sequence of tensor shapes
         method: Optimization method
+        optimize_tc: If True, optimize only time complexity (sc_weight=0)
         **kwargs: Additional arguments for the method
 
     Returns:
@@ -227,6 +241,11 @@ def get_omeco_complexity(
         "treesa": omeco.TreeSA,
         "treesa_slicer": omeco.TreeSASlicer,
     }
+
+    # For TreeSA, support optimize_tc mode
+    if method == "treesa" and optimize_tc and "score" not in kwargs:
+        kwargs["score"] = omeco.ScoreFunction(tc_weight=1.0, sc_weight=0.0)
+
     method_obj = method_map[method](**kwargs)
 
     tree = omeco.optimize_code(ixs, out, sizes, method_obj)
