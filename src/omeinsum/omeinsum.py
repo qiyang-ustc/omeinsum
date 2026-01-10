@@ -24,9 +24,26 @@ class OMEinsum(nn.Module):
         force_block_dim_first: bool = False,
         log_path: bool = True,
         optimize: str | bool | None = "auto",
-        path_optimizer: str = "opt_einsum",
-        omeco_method: str = "greedy",
+        path_optimizer: str = "auto",
+        omeco_method: str = "treesa",
+        omeco_optimize_tc: bool = True,
     ) -> None:
+        """
+        OMEinsum: Chunked einsum with automatic path optimization.
+
+        Args:
+            equation: Einsum equation with explicit output (e.g., "ij,jk->ik")
+            block_dim: Dimension to chunk/block along
+            batch_size: Chunk size for blocking
+            use_checkpoint: Use gradient checkpointing
+            use_reentrant: Use reentrant checkpointing
+            force_block_dim_first: Force contracting blocked tensor first
+            log_path: Print contraction path info
+            optimize: opt_einsum optimization strategy (used when path_optimizer="opt_einsum")
+            path_optimizer: "auto" (try omeco, fallback to opt_einsum), "omeco", or "opt_einsum"
+            omeco_method: omeco method - "greedy" or "treesa"
+            omeco_optimize_tc: If True, optimize only time complexity (recommended)
+        """
         super().__init__()
         self.equation = equation
         self.block_dim = block_dim
@@ -36,13 +53,21 @@ class OMEinsum(nn.Module):
         self.force_block_dim_first = force_block_dim_first
         self.log_path = log_path
         self.optimize = optimize
-        self.path_optimizer = path_optimizer
         self.omeco_method = omeco_method
+        self.omeco_optimize_tc = omeco_optimize_tc
 
-        if path_optimizer == "omeco" and not OMECO_AVAILABLE:
+        # Resolve path_optimizer: "auto" tries omeco first, falls back to opt_einsum
+        if path_optimizer == "auto":
+            if OMECO_AVAILABLE:
+                self.path_optimizer = "omeco"
+            else:
+                self.path_optimizer = "opt_einsum"
+        elif path_optimizer == "omeco" and not OMECO_AVAILABLE:
             raise ImportError(
                 "omeco is not installed. Install it with: pip install omeco"
             )
+        else:
+            self.path_optimizer = path_optimizer
 
         if not isinstance(self.batch_size, int) or self.batch_size <= 0:
             raise ValueError("batch_size must be a positive integer")
@@ -79,7 +104,10 @@ class OMEinsum(nn.Module):
 
         # Set up path optimizer
         if self.path_optimizer == "omeco":
-            self._path_optimizer = OmecoOptimizer(method=self.omeco_method)
+            self._path_optimizer = OmecoOptimizer(
+                method=self.omeco_method,
+                optimize_tc=self.omeco_optimize_tc,
+            )
         elif self.force_block_dim_first:
             self._path_optimizer = _BlockFirstOptimizer(self.tidx, tail_optimize=self.optimize)
 
@@ -107,15 +135,13 @@ class OMEinsum(nn.Module):
             self._path = path
             self._path_shapes = shapes
             if self.log_path and not self._path_logged:
-                optimizer_info = (
-                    f"path_optimizer={self.path_optimizer}"
-                    + (f" omeco_method={self.omeco_method}" if self.path_optimizer == "omeco" else "")
-                )
+                if self.path_optimizer == "omeco":
+                    optimizer_info = f"path_optimizer=omeco method={self.omeco_method} optimize_tc={self.omeco_optimize_tc}"
+                else:
+                    optimizer_info = f"path_optimizer=opt_einsum optimize={optimize}"
                 print(
                     f"[OMEinsum] eq={self.equation} block_dim={self.block_dim} "
-                    f"batch_size={self.batch_size} {optimizer_info} "
-                    f"force_block_dim_first={self.force_block_dim_first} "
-                    f"optimize={optimize}",
+                    f"batch_size={self.batch_size} {optimizer_info}",
                     flush=True,
                 )
                 print(info, flush=True)
