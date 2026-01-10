@@ -26,6 +26,9 @@ dev = [
     "numpy>=1.22",
     "pytest>=7.0",
 ]
+omeco = [
+    "omeco>=0.1.0",
+]
 
 [project.urls]
 Homepage = "https://github.com/qyang/omeinsum"
