@@ -10,6 +10,7 @@ import torch.nn as nn
 
 from .chunk_multi import run_chunked_einsum_multi_device
 from .chunk_single import run_chunked_einsum
+from .omeco_adapter import OMECO_AVAILABLE, OmecoOptimizer, einsum_to_omeco_format
 
 
 class OMEinsum(nn.Module):
@@ -23,6 +24,8 @@ class OMEinsum(nn.Module):
         force_block_dim_first: bool = False,
         log_path: bool = True,
         optimize: str | bool | None = "auto",
+        path_optimizer: str = "opt_einsum",
+        omeco_method: str = "greedy",
     ) -> None:
         super().__init__()
         self.equation = equation
@@ -33,6 +36,13 @@ class OMEinsum(nn.Module):
         self.force_block_dim_first = force_block_dim_first
         self.log_path = log_path
         self.optimize = optimize
+        self.path_optimizer = path_optimizer
+        self.omeco_method = omeco_method
+
+        if path_optimizer == "omeco" and not OMECO_AVAILABLE:
+            raise ImportError(
+                "omeco is not installed. Install it with: pip install omeco"
+            )
 
         if not isinstance(self.batch_size, int) or self.batch_size <= 0:
             raise ValueError("batch_size must be a positive integer")
@@ -66,7 +76,11 @@ class OMEinsum(nn.Module):
         self._path_shapes: tuple[tuple[int, ...], ...] | None = None
         self._path_logged = False
         self._path_optimizer = None
-        if self.force_block_dim_first:
+
+        # Set up path optimizer
+        if self.path_optimizer == "omeco":
+            self._path_optimizer = OmecoOptimizer(method=self.omeco_method)
+        elif self.force_block_dim_first:
             self._path_optimizer = _BlockFirstOptimizer(self.tidx, tail_optimize=self.optimize)
 
     def forward(self, *tensors: torch.Tensor) -> torch.Tensor:
@@ -93,9 +107,14 @@ class OMEinsum(nn.Module):
             self._path = path
             self._path_shapes = shapes
             if self.log_path and not self._path_logged:
+                optimizer_info = (
+                    f"path_optimizer={self.path_optimizer}"
+                    + (f" omeco_method={self.omeco_method}" if self.path_optimizer == "omeco" else "")
+                )
                 print(
                     f"[OMEinsum] eq={self.equation} block_dim={self.block_dim} "
-                    f"batch_size={self.batch_size} force_block_dim_first={self.force_block_dim_first} "
+                    f"batch_size={self.batch_size} {optimizer_info} "
+                    f"force_block_dim_first={self.force_block_dim_first} "
                     f"optimize={optimize}",
                     flush=True,
                 )
