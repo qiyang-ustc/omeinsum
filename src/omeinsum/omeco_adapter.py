@@ -18,6 +18,9 @@ except ImportError:
     OPT_EINSUM_AVAILABLE = False
 
 
+_PathOptimizerBase = opt_einsum.paths.PathOptimizer if OPT_EINSUM_AVAILABLE else object
+
+
 def einsum_to_omeco_format(
     equation: str,
     shapes: Sequence[tuple[int, ...]],
@@ -107,6 +110,9 @@ def omeco_tree_to_path(tree, num_tensors: int) -> list[tuple[int, int]]:
     if hasattr(tree, "get_path"):
         return tree.get_path()
 
+    if hasattr(tree, "to_dict"):
+        return _omeco_tree_dict_to_path(tree.to_dict())
+
     # Fallback: try to traverse the tree structure
     # This is a placeholder - actual implementation depends on omeco's tree format
     if hasattr(tree, "__iter__"):
@@ -120,7 +126,48 @@ def omeco_tree_to_path(tree, num_tensors: int) -> list[tuple[int, int]]:
     )
 
 
-class OmecoOptimizer:
+def _omeco_tree_dict_to_path(tree_dict) -> list[tuple[int, int]]:
+    path = []
+    current_indices: list[int] = []
+    next_idx = 0
+
+    def collect_leaves(node) -> None:
+        if "tensor_index" in node:
+            current_indices.append(int(node["tensor_index"]))
+            return
+        for child in node["args"]:
+            collect_leaves(child)
+
+    collect_leaves(tree_dict)
+    current_indices.sort()
+    next_idx = (max(current_indices) + 1) if current_indices else 0
+
+    def process(node) -> int:
+        nonlocal next_idx
+        if "tensor_index" in node:
+            return int(node["tensor_index"])
+        args = node["args"]
+        if len(args) != 2:
+            raise TypeError("omeco tree conversion expects binary contraction nodes")
+        left_idx = process(args[0])
+        right_idx = process(args[1])
+        pos_left = current_indices.index(left_idx)
+        pos_right = current_indices.index(right_idx)
+        if pos_left > pos_right:
+            pos_left, pos_right = pos_right, pos_left
+        path.append((pos_left, pos_right))
+        new_idx = next_idx
+        next_idx += 1
+        current_indices.remove(left_idx)
+        current_indices.remove(right_idx)
+        current_indices.append(new_idx)
+        return new_idx
+
+    process(tree_dict)
+    return path
+
+
+class OmecoOptimizer(_PathOptimizerBase):
     """
     Path optimizer that uses omeco for contraction path finding.
 
@@ -265,8 +312,8 @@ def get_omeco_complexity(
 
 if OPT_EINSUM_AVAILABLE:
     # Register as opt_einsum PathOptimizer subclass if available
-    class OmecoPathOptimizer(opt_einsum.paths.PathOptimizer, OmecoOptimizer):
+    class OmecoPathOptimizer(OmecoOptimizer):
         """OmecoOptimizer as a proper opt_einsum PathOptimizer subclass."""
 
-        def __init__(self, method: str = "greedy", **kwargs) -> None:
-            OmecoOptimizer.__init__(self, method, **kwargs)
+        def __init__(self, method: str = "greedy", optimize_tc: bool = False, **kwargs) -> None:
+            super().__init__(method=method, optimize_tc=optimize_tc, **kwargs)

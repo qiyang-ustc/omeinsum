@@ -14,6 +14,7 @@ def run_chunked_einsum(
     out_dim: int,
     use_checkpoint: bool,
     use_reentrant: bool,
+    determinism_check: str = "default",
 ) -> torch.Tensor:
     if not chunks:
         return einsum_fn(*base_inputs)
@@ -26,7 +27,10 @@ def run_chunked_einsum(
         inputs = list(base_inputs)
         inputs[tidx] = chunk
         if use_checkpoint and torch.is_grad_enabled():
-            out = checkpoint(_call, *inputs, use_reentrant=use_reentrant)
+            checkpoint_kwargs = {"use_reentrant": use_reentrant}
+            if not use_reentrant and determinism_check != "default":
+                checkpoint_kwargs["determinism_check"] = determinism_check
+            out = checkpoint(_call, *inputs, **checkpoint_kwargs)
         else:
             out = einsum_fn(*inputs)
         results.append(out)

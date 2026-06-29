@@ -27,6 +27,7 @@ class OMEinsum(nn.Module):
         path_optimizer: str = "auto",
         omeco_method: str = "treesa",
         omeco_optimize_tc: bool = True,
+        determinism_check: str = "default",
     ) -> None:
         """
         OMEinsum: Chunked einsum with automatic path optimization.
@@ -43,6 +44,7 @@ class OMEinsum(nn.Module):
             path_optimizer: "auto" (try omeco, fallback to opt_einsum), "omeco", or "opt_einsum"
             omeco_method: omeco method - "greedy" or "treesa"
             omeco_optimize_tc: If True, optimize only time complexity (recommended)
+            determinism_check: PyTorch checkpoint determinism policy for non-reentrant chunks
         """
         super().__init__()
         self.equation = equation
@@ -55,6 +57,7 @@ class OMEinsum(nn.Module):
         self.optimize = optimize
         self.omeco_method = omeco_method
         self.omeco_optimize_tc = omeco_optimize_tc
+        self.determinism_check = determinism_check
 
         # Resolve path_optimizer: "auto" tries omeco first, falls back to opt_einsum
         if path_optimizer == "auto":
@@ -171,6 +174,7 @@ class OMEinsum(nn.Module):
                 self.out_dim,
                 self.use_checkpoint,
                 self.use_reentrant,
+                self.determinism_check,
             )
 
         return run_chunked_einsum_multi_device(
@@ -181,6 +185,7 @@ class OMEinsum(nn.Module):
             self.out_dim,
             self.use_checkpoint,
             self.use_reentrant,
+            self.determinism_check,
         )
 
 

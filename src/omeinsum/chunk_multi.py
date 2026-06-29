@@ -34,6 +34,7 @@ def run_chunked_einsum_multi_device(
     out_dim: int,
     use_checkpoint: bool,
     use_reentrant: bool,
+    determinism_check: str = "default",
     devices: Sequence[torch.device] | None = None,
 ) -> torch.Tensor:
     if not chunks:
@@ -53,6 +54,7 @@ def run_chunked_einsum_multi_device(
             out_dim,
             use_checkpoint,
             use_reentrant,
+            determinism_check,
         )
 
     chunks_per_device = _split_chunks_for_devices(chunks, len(devices))
@@ -87,6 +89,7 @@ def run_chunked_einsum_multi_device(
             out_dim,
             use_checkpoint,
             use_reentrant,
+            determinism_check,
         )
         outputs.append(device_outputs if device_outputs.device == device else device_outputs.to(device))
 

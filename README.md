@@ -62,6 +62,24 @@ out = model(A, B, C, D)
 - Use `use_checkpoint=True` to trade compute for memory when gradients are enabled.
 - Experimental research code; APIs may change between commits.
 
+## Optional YASTN compatibility
+
+OMEinsum also includes an experimental YASTN compatibility layer for YASTN's
+PyTorch `no_fusion` block-GEMM path. It is isolated under `omeinsum.compat.yastn`
+and does not patch YASTN at import time.
+
+```python
+import yastn
+from yastn.backend import backend_torch
+from omeinsum.compat.yastn import enable_yastn_omeinsum
+
+backend = enable_yastn_omeinsum(backend_torch)
+config = yastn.make_config(backend=backend, sym="U1", tensordot_policy="no_fusion")
+```
+
+The first implementation keeps tensors on their current device and reserves
+CPU/GPU mixed placement for a later, explicitly profiled version.
+
 ## Examples
 
 - Heisenberg iPEPS demo (D=12,chi=1536 on four H100 GPUs): `tests/heisenberg_omeinsum.py`
